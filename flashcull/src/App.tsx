@@ -1,3 +1,4 @@
+'maincode'
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { 
   X, Check, Trash2, ChevronLeft, ChevronRight, 
