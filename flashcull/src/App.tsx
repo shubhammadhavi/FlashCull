@@ -276,53 +276,100 @@ function App() {
   }, [isSortMenuOpen]);
 
   // --- UPDATED FUNCTION: Immediate Error Handling ---
-  const handleOpenFolder = async () => {
-    try {
-      // @ts-ignore
-      const dirHandle = await window.showDirectoryPicker({ 
-        mode: 'readwrite',
-        id: `flashcull_${Date.now()}`,
-        startIn: 'pictures'
-      });
+const handleOpenFolder = async () => {
+  if (!(window as any).showDirectoryPicker) {
+    alert(
+      'Your browser does not support the File System Access API.\n\n' +
+      'Try Chrome, Edge, or another Chromium based browser.'
+    );
+    return;
+  }
 
-      setRootHandle(dirHandle);
-      setStatus('loading');
-      const foundFiles: FileEntry[] = [];
-      
-      // @ts-ignore
-      for await (const entry of dirHandle.values()) {
-        try {
-          if (entry.kind === 'file') {
-            const ext = entry.name.split('.').pop()?.toLowerCase() || '';
-            if (ALLOWED_EXTENSIONS.includes(ext)) {
-              // @ts-ignore
-              foundFiles.push({ name: entry.name, handle: entry, status: 'unreviewed' });
-            }
-          }
-        } catch (e) {
-          console.warn("Skipped problematic file:", entry.name);
-        }
-      }
+  let dirHandle: FileSystemDirectoryHandle;
 
-      if (foundFiles.length === 0) {
-        alert(
-          "Cannot open this folder. macOS restricts access to system roots like 'Downloads' or 'Documents'.\n\nSOLUTION: Create a new folder inside Downloads, move your photos there, and open that."
-        );
-        setStatus('idle');
-        setRootHandle(null); // Ensure state is reset right away
-        return;
-      }
+  // 1) Let the user pick a directory
+  try {
+    dirHandle = await (window as any).showDirectoryPicker({
+      mode: 'readwrite',
+    });
+  } catch (err: any) {
+    console.error('Folder picker error:', err);
 
-      setFiles(foundFiles);
-      setStatus('ready');
-    } catch (err) {
-      alert(
-        "Cannot open this folder. macOS restricts access to system roots like 'Downloads' or 'Documents'.\n\nSOLUTION: Create a new folder inside Downloads, move your photos there, and open that."
-      );
+    const name = err?.name || '';
+    const msg = err?.message || '';
+
+    // Treat user cancel / close as a no-op (no popup)
+    const isUserCancel =
+      name === 'AbortError' ||
+      name === 'NotAllowedError' ||
+      /aborted|canceled|cancelled/i.test(msg);
+
+    if (isUserCancel) {
+      // Just reset to idle and return
       setStatus('idle');
-      setRootHandle(null); // Ensure button resets immediately
+      return;
     }
-  };
+
+    // Real error
+    alert(
+      'Cannot open this folder. macOS may restrict access to some locations.\n\n' +
+      'Details: ' + name + (msg ? ' - ' + msg : '') + '\n\n' +
+      'Solution: Create a new folder for your photos (for example inside Downloads), ' +
+      'move your images there, and open that.'
+    );
+
+    setRootHandle(null);
+    setFiles([]);
+    setStatus('idle');
+    return;
+  }
+
+  // 2) We have a directory handle, now scan it
+  setStatus('loading');
+
+  try {
+    const foundFiles: FileEntry[] = [];
+
+    // @ts-ignore
+    for await (const entry of dirHandle.values()) {
+      try {
+        if (entry.kind === 'file') {
+          const ext = entry.name.split('.').pop()?.toLowerCase() || '';
+          if (ALLOWED_EXTENSIONS.includes(ext)) {
+            // @ts-ignore
+            foundFiles.push({ name: entry.name, handle: entry, status: 'unreviewed' });
+          }
+        }
+      } catch (e) {
+        console.warn('Skipped problematic file:', entry?.name, e);
+      }
+    }
+
+    if (foundFiles.length === 0) {
+      alert(
+        'No supported images found in this folder.\n\n' +
+        'Open a folder that contains photos or raw files only.'
+      );
+      setFiles([]);
+      setRootHandle(null);
+      setStatus('idle');
+      return;
+    }
+
+    setRootHandle(dirHandle);
+    setFiles(foundFiles);
+    setStatus('ready');
+  } catch (err: any) {
+    console.error('Folder scan error:', err);
+    const name = err?.name || 'Error';
+    const msg = err?.message || '';
+    alert('Error while reading this folder.\n\n' + name + (msg ? ' - ' + msg : ''));
+    setRootHandle(null);
+    setFiles([]);
+    setStatus('idle');
+  }
+};
+
 
   const updateStatus = (index: number, newStatus: 'keep' | 'reject' | 'unreviewed') => {
     setFiles(prev => {
