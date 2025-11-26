@@ -6,8 +6,9 @@ import {
 } from 'lucide-react';
 import exifr from 'exifr';
 import heic2any from 'heic2any';
-import { Logo } from './Logo'; // IMPORT THE NEW LOGO
+import { Logo } from './Logo';
 
+// STRICT LIST: Only files we know we can handle
 const ALLOWED_EXTENSIONS = [
   'jpg', 'jpeg', 'png', 'webp', 'avif', 
   'heic', 'heif', 
@@ -232,7 +233,7 @@ const ReviewMode = ({ fileEntry, allFiles, selectedIndex, onClose, onNavigate, o
         {src === '' ? (
           <div className="flex flex-col items-center gap-2 text-gray-500">
             <Loader2 className="animate-spin" size={32} />
-            <span className="text-sm font-mono">Loading...</span>
+            <span className="text-sm font-mono">Processing...</span>
           </div>
         ) : src === null ? (
            <div className="flex flex-col items-center text-gray-500 gap-4"><AlertCircle size={48} /><span>Preview Unavailable</span></div>
@@ -240,7 +241,7 @@ const ReviewMode = ({ fileEntry, allFiles, selectedIndex, onClose, onNavigate, o
           <img src={src} className={`max-h-full max-w-full object-contain shadow-2xl transition-all duration-200 ${
             fileEntry.status === 'keep' ? 'ring-4 ring-green-500/50' : 
             fileEntry.status === 'reject' ? 'opacity-50 grayscale' : ''
-          }`} />
+          }`} style={{ imageRendering: 'crisp-edges' }} />
         )}
       </div>
 
@@ -273,24 +274,53 @@ function App() {
     return () => window.removeEventListener('click', closeMenu);
   }, [isSortMenuOpen]);
 
+  // --- UPDATED FUNCTION: Immediate Error Handling ---
   const handleOpenFolder = async () => {
     try {
       // @ts-ignore
-      const dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
+      const dirHandle = await window.showDirectoryPicker({ 
+        mode: 'readwrite',
+        id: `flashcull_${Date.now()}`,
+        startIn: 'pictures'
+      });
+
       setRootHandle(dirHandle);
       setStatus('loading');
       const foundFiles: FileEntry[] = [];
+      
       // @ts-ignore
       for await (const entry of dirHandle.values()) {
-        const ext = entry.name.split('.').pop()?.toLowerCase() || '';
-        if (entry.kind === 'file' && ALLOWED_EXTENSIONS.includes(ext)) {
-          // @ts-ignore
-          foundFiles.push({ name: entry.name, handle: entry, status: 'unreviewed' });
+        try {
+          if (entry.kind === 'file') {
+            const ext = entry.name.split('.').pop()?.toLowerCase() || '';
+            if (ALLOWED_EXTENSIONS.includes(ext)) {
+              // @ts-ignore
+              foundFiles.push({ name: entry.name, handle: entry, status: 'unreviewed' });
+            }
+          }
+        } catch (e) {
+          console.warn("Skipped problematic file:", entry.name);
         }
       }
+
+      if (foundFiles.length === 0) {
+        alert(
+          "Cannot open this folder. macOS restricts access to system roots like 'Downloads' or 'Documents'.\n\nSOLUTION: Create a new folder inside Downloads, move your photos there, and open that."
+        );
+        setStatus('idle');
+        setRootHandle(null); // Ensure state is reset right away
+        return;
+      }
+
       setFiles(foundFiles);
       setStatus('ready');
-    } catch (err) { console.error(err); setStatus('idle'); }
+    } catch (err) {
+      alert(
+        "Cannot open this folder. macOS restricts access to system roots like 'Downloads' or 'Documents'.\n\nSOLUTION: Create a new folder inside Downloads, move your photos there, and open that."
+      );
+      setStatus('idle');
+      setRootHandle(null); // Ensure button resets immediately
+    }
   };
 
   const updateStatus = (index: number, newStatus: 'keep' | 'reject' | 'unreviewed') => {
@@ -303,21 +333,51 @@ function App() {
 
   const handleProcessFiles = async () => {
     if (!rootHandle) return;
+
     const rejects = files.filter(f => f.status === 'reject');
     if (rejects.length === 0) return;
+
     if (!confirm(`Move ${rejects.length} files to '_Trash'?`)) return;
 
     setStatus('processing');
+
     try {
+      // Create or open the _Trash folder inside the chosen root
       // @ts-ignore
-      const trashHandle = await rootHandle.getDirectoryHandle('_Trash', { create: true });
-      for (const file of rejects) { 
-        // @ts-ignore
-        await file.handle.move(trashHandle); 
+      const trashHandle: FileSystemDirectoryHandle = await rootHandle.getDirectoryHandle('_Trash', { create: true });
+
+      for (const fileEntry of rejects) {
+        try {
+          // Read the original file from its handle
+          // @ts-ignore
+          const srcFile: File = await fileEntry.handle.getFile();
+
+          // Create or open the destination file in _Trash
+          // @ts-ignore
+          const destFileHandle: FileSystemFileHandle = await trashHandle.getFileHandle(fileEntry.name, { create: true });
+
+          // Write the contents into the new file
+          // @ts-ignore
+          const writable = await destFileHandle.createWritable();
+          await writable.write(srcFile);
+          await writable.close();
+
+          // Remove the original file from the root directory
+          // @ts-ignore
+          await rootHandle.removeEntry(fileEntry.name);
+        } catch (err) {
+          console.error(`Failed to move ${fileEntry.name}`, err);
+        }
       }
+
+      // Update state: remove all rejected files
       setFiles(prev => prev.filter(f => f.status !== 'reject'));
+    } catch (error) {
+      console.error(error);
+      alert("Error moving files.");
+    } finally {
       setStatus('ready');
-    } catch (error) { alert("Error moving files."); setStatus('ready'); }
+    }
   };
 
   const sortedFiles = useMemo(() => {
@@ -327,7 +387,7 @@ function App() {
     } else if (sortMode === 'name_desc') {
       sorted.sort((a, b) => b.name.localeCompare(a.name, undefined, { numeric: true, sensitivity: 'base' }));
     } else if (sortMode === 'status') {
-      const rank = { keep: 1, unreviewed: 2, reject: 3 };
+      const rank: Record<FileEntry['status'], number> = { keep: 1, unreviewed: 2, reject: 3 };
       sorted.sort((a, b) => rank[a.status] - rank[b.status]);
     }
     return sorted;
@@ -337,7 +397,6 @@ function App() {
 
   return (
     <div className="h-screen flex flex-col bg-[#0f0f0f] text-white overflow-hidden font-sans selection:bg-blue-500/30">
-      
       {status === 'idle' && (
         <div className="h-full flex flex-col items-center justify-center space-y-6">
           <div className="mb-6 transform transition-all hover:scale-110 duration-300">
@@ -351,7 +410,6 @@ function App() {
 
       {(status === 'ready' || status === 'processing') && (
         <div className="h-full flex flex-col">
-          
           <header className="h-16 px-6 border-b border-gray-800 flex justify-between items-center bg-[#1a1a1a]">
             <div className="flex items-center gap-3">
               <Logo className="w-8 h-8" />
@@ -381,12 +439,19 @@ function App() {
                 </div>
               )}
             </div>
-
             <div className="flex items-center gap-3 w-32">
               <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Size</span>
               <div className="flex items-center gap-2 flex-1 group">
                 <ImageIcon size={22} className="text-gray-500" />
-                <input type="range" min="4" max="12" step="1" value={columnCount} onChange={(e) => setColumnCount(Number(e.target.value))} className="w-full h-1 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-500 hover:accent-blue-400" />
+                <input 
+                  type="range" 
+                  min="4" 
+                  max="12" 
+                  step="1"
+                  value={columnCount}
+                  onChange={(e) => setColumnCount(Number(e.target.value))}
+                  className="w-full h-1 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-500 hover:accent-blue-400"
+                />
                 <LayoutGrid size={16} className="text-gray-500" />
               </div>
             </div>
@@ -396,10 +461,19 @@ function App() {
             {status === 'processing' ? (
               <div className="h-full flex items-center justify-center text-xl text-gray-400 animate-pulse">Moving files to _Trash...</div>
             ) : (
-              <div className="grid gap-4 transition-all duration-300 ease-in-out" style={{ gridTemplateColumns: `repeat(${columnCount}, minmax(0, 1fr))` }}>
+              <div 
+                className="grid gap-4 transition-all duration-300 ease-in-out"
+                style={{ 
+                  gridTemplateColumns: `repeat(${columnCount}, minmax(0, 1fr))` 
+                }}
+              >
                 {sortedFiles.map((file, idx) => (
                   <div key={file.name} className="aspect-square w-full"> 
-                    <Thumbnail fileHandle={file.handle} status={file.status} onClick={() => setSelectedIndex(idx)} />
+                    <Thumbnail 
+                      fileHandle={file.handle} 
+                      status={file.status}
+                      onClick={() => setSelectedIndex(idx)} 
+                    />
                   </div>
                 ))}
               </div>
