@@ -1,4 +1,3 @@
-'maincode'
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { 
   X, Check, Trash2, ChevronLeft, ChevronRight, 
@@ -24,11 +23,93 @@ type FileEntry = {
 
 type SortMode = 'name_asc' | 'name_desc' | 'status';
 
-// --- GLOBAL CACHE ---
+// GLOBAL CACHE
 const globalImageCache: Record<string, string> = {};
 const globalLoadPromises: Record<string, Promise<string | null>> = {};
 
-// --- BRUTE FORCE JPEG FINDER ---
+// CLEAR IMAGE CACHE
+const clearImageCache = () => {
+  for (const url of Object.values(globalImageCache)) {
+    try {
+      URL.revokeObjectURL(url);
+    } catch {
+      // ignore
+    }
+  }
+  for (const key of Object.keys(globalImageCache)) {
+    delete globalImageCache[key];
+  }
+  for (const key of Object.keys(globalLoadPromises)) {
+    delete globalLoadPromises[key];
+  }
+};
+
+// RESIZE IMAGE TO MAX RESOLUTION FOR PREVIEWS
+const createResizedObjectUrl = (file: File, maxSize = 1920): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    const tempUrl = URL.createObjectURL(file);
+    const img = new Image();
+
+    img.onload = () => {
+      const width = img.width;
+      const height = img.height;
+
+      if (width <= maxSize && height <= maxSize) {
+        URL.revokeObjectURL(tempUrl);
+        const originalUrl = URL.createObjectURL(file);
+        resolve(originalUrl);
+        return;
+      }
+
+      const scale = Math.min(maxSize / width, maxSize / height);
+      const targetWidth = Math.round(width * scale);
+      const targetHeight = Math.round(height * scale);
+
+      const canvas = document.createElement('canvas');
+      canvas.width = targetWidth;
+      canvas.height = targetHeight;
+      const ctx = canvas.getContext('2d');
+
+      if (!ctx) {
+        URL.revokeObjectURL(tempUrl);
+        const originalUrl = URL.createObjectURL(file);
+        resolve(originalUrl);
+        return;
+      }
+
+      ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
+
+      const outputType =
+        file.type && file.type.startsWith('image/')
+          ? file.type
+          : 'image/jpeg';
+
+      canvas.toBlob(
+        blob => {
+          URL.revokeObjectURL(tempUrl);
+          if (!blob) {
+            const originalUrl = URL.createObjectURL(file);
+            resolve(originalUrl);
+            return;
+          }
+          const resizedUrl = URL.createObjectURL(blob);
+          resolve(resizedUrl);
+        },
+        outputType,
+        0.9
+      );
+    };
+
+    img.onerror = err => {
+      URL.revokeObjectURL(tempUrl);
+      reject(err);
+    };
+
+    img.src = tempUrl;
+  });
+};
+
+// BRUTE FORCE JPEG FINDER FOR RAW FILES
 const findLargestJpegInRaw = async (file: File): Promise<Blob | null> => {
   const CHUNK_SIZE = 6 * 1024 * 1024; 
   const buffer = await file.slice(0, CHUNK_SIZE).arrayBuffer();
@@ -65,7 +146,7 @@ const findLargestJpegInRaw = async (file: File): Promise<Blob | null> => {
   return bestBlob;
 };
 
-// --- IMAGE LOADER ---
+// IMAGE LOADER
 const loadImage = async (file: File): Promise<string | null> => {
   const ext = file.name.split('.').pop()?.toLowerCase() || '';
   
@@ -75,7 +156,7 @@ const loadImage = async (file: File): Promise<string | null> => {
   const loadPromise = (async () => {
     try {
       if (['jpg', 'jpeg', 'png', 'webp', 'avif'].includes(ext)) {
-        const url = URL.createObjectURL(file);
+        const url = await createResizedObjectUrl(file, 1920);
         globalImageCache[file.name] = url;
         return url;
       }
@@ -83,7 +164,7 @@ const loadImage = async (file: File): Promise<string | null> => {
       if (['heic', 'heif'].includes(ext)) {
         const convertedBlob = await heic2any({
           blob: file,
-          toType: "image/jpeg",
+          toType: 'image/jpeg',
           quality: 0.5 
         });
         const blob = Array.isArray(convertedBlob) ? convertedBlob[0] : convertedBlob;
@@ -121,8 +202,15 @@ const loadImage = async (file: File): Promise<string | null> => {
   return loadPromise;
 };
 
-// --- COMPONENT: THUMBNAIL ---
-const Thumbnail = ({ fileHandle, status, onClick, isSelected }: any) => {
+// THUMBNAIL COMPONENT
+type ThumbnailProps = {
+  fileHandle: FileSystemFileHandle;
+  status: FileEntry['status'];
+  onClick: () => void;
+  isSelected: boolean;
+};
+
+function Thumbnail({ fileHandle, status, onClick, isSelected }: ThumbnailProps) {
   const [src, setSrc] = useState<string | null>(globalImageCache[fileHandle.name] || '');
 
   useEffect(() => {
@@ -138,7 +226,9 @@ const Thumbnail = ({ fileHandle, status, onClick, isSelected }: any) => {
       if (isMounted) setSrc(url);
     };
     load();
-    return () => { isMounted = false; };
+    return () => {
+      isMounted = false;
+    };
   }, [fileHandle]);
 
   return (
@@ -151,18 +241,59 @@ const Thumbnail = ({ fileHandle, status, onClick, isSelected }: any) => {
         hover:shadow-xl hover:scale-[1.02] hover:z-20
       `}
     >
-      {src === '' && <div className="w-full h-full flex items-center justify-center text-gray-600"><Loader2 className="animate-spin" size={24} /></div>}
-      {src === null && <div className="w-full h-full flex flex-col items-center justify-center text-gray-500 gap-2"><AlertCircle size={24} /><span className="text-[10px]">Error</span></div>}
-      {src && <img src={src} alt="" className="w-full h-full object-cover" />}
+      {src === '' && (
+        <div className="w-full h-full flex items-center justify-center text-gray-600">
+          <Loader2 className="animate-spin" size={24} />
+        </div>
+      )}
+      {src === null && (
+        <div className="w-full h-full flex flex-col items-center justify-center text-gray-500 gap-2">
+          <AlertCircle size={24} />
+          <span className="text-[10px]">Error</span>
+        </div>
+      )}
+      {src && (
+        <img
+          src={src}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          className="w-full h-full object-cover"
+        />
+      )}
 
-      {status === 'keep' && <div className="absolute top-2 right-2 bg-green-500 text-black p-1 rounded-full shadow-lg"><Check size={10} strokeWidth={4} /></div>}
-      {status === 'reject' && <div className="absolute top-2 right-2 bg-red-500 text-white p-1 rounded-full shadow-lg"><Trash2 size={10} /></div>}
+      {status === 'keep' && (
+        <div className="absolute top-2 right-2 bg-green-500 text-black p-1 rounded-full shadow-lg">
+          <Check size={10} strokeWidth={4} />
+        </div>
+      )}
+      {status === 'reject' && (
+        <div className="absolute top-2 right-2 bg-red-500 text-white p-1 rounded-full shadow-lg">
+          <Trash2 size={10} />
+        </div>
+      )}
     </div>
   );
+}
+
+// REVIEW MODE COMPONENT
+type ReviewModeProps = {
+  fileEntry: FileEntry;
+  allFiles: FileEntry[];
+  selectedIndex: number;
+  onClose: () => void;
+  onNavigate: (index: number) => void;
+  onMark: (status: FileEntry['status']) => void;
 };
 
-// --- COMPONENT: REVIEW MODE ---
-const ReviewMode = ({ fileEntry, allFiles, selectedIndex, onClose, onNavigate, onMark }: any) => {
+function ReviewMode({
+  fileEntry,
+  allFiles,
+  selectedIndex,
+  onClose,
+  onNavigate,
+  onMark
+}: ReviewModeProps) {
   const [src, setSrc] = useState<string | null>(globalImageCache[fileEntry.name] || '');
   const filmstripRef = useRef<HTMLDivElement>(null);
 
@@ -183,8 +314,14 @@ const ReviewMode = ({ fileEntry, allFiles, selectedIndex, onClose, onNavigate, o
 
   useEffect(() => {
     if (filmstripRef.current) {
-      const activeThumb = filmstripRef.current.children[selectedIndex] as HTMLElement;
-      if (activeThumb) activeThumb.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+      const activeThumb = filmstripRef.current.children[selectedIndex] as HTMLElement | undefined;
+      if (activeThumb) {
+        activeThumb.scrollIntoView({
+          behavior: 'smooth',
+          block: 'nearest',
+          inline: 'center'
+        });
+      }
     }
   }, [selectedIndex]);
 
@@ -205,11 +342,18 @@ const ReviewMode = ({ fileEntry, allFiles, selectedIndex, onClose, onNavigate, o
     <div className="fixed inset-0 z-50 bg-[#0f0f0f] flex flex-col animate-in fade-in duration-200">
       <div className="h-14 flex items-center justify-between px-4 border-b border-gray-800 bg-[#1a1a1a]">
         <div className="flex items-center gap-4">
-          <button onClick={onClose} className="p-2 hover:bg-gray-700 rounded-lg text-gray-400 hover:text-white transition-colors"><X size={20} /></button>
-          <span className="font-mono text-sm text-gray-400 truncate max-w-[200px]">{fileEntry.name}</span>
+          <button
+            onClick={onClose}
+            className="p-2 hover:bg-gray-700 rounded-lg text-gray-400 hover:text-white transition-colors"
+          >
+            <X size={20} />
+          </button>
+          <span className="font-mono text-sm text-gray-400 truncate max-w-[200px]">
+            {fileEntry.name}
+          </span>
         </div>
         
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-3">
           <button 
             onClick={() => onMark('unreviewed')}
             title="Reset (Backspace)"
@@ -218,18 +362,52 @@ const ReviewMode = ({ fileEntry, allFiles, selectedIndex, onClose, onNavigate, o
             <RotateCcw size={14} /> Reset
           </button>
 
-          <div className={`px-3 py-1.5 rounded text-xs font-bold tracking-wider transition-colors border ${
-            fileEntry.status === 'keep' ? 'bg-green-500/10 text-green-400 border-green-500/20' : 
-            fileEntry.status === 'reject' ? 'bg-red-500/10 text-red-400 border-red-500/20' : 'bg-gray-800 text-gray-500 border-transparent'
-          }`}>
+          <div
+            className={`px-3 py-1.5 rounded text-xs font-bold tracking-wider transition-colors border ${
+              fileEntry.status === 'keep'
+                ? 'bg-green-500/10 text-green-400 border-green-500/20'
+                : fileEntry.status === 'reject'
+                ? 'bg-red-500/10 text-red-400 border-red-500/20'
+                : 'bg-gray-800 text-gray-500 border-transparent'
+            }`}
+          >
             {fileEntry.status === 'unreviewed' ? 'UNREVIEWED' : fileEntry.status.toUpperCase()}
+          </div>
+
+          {/* Keyboard hint pills */}
+          <div className="hidden md:flex items-center gap-2">
+            <div className="px-3 py-1.5 rounded bg-gray-800 text-gray-300 text-[11px] font-medium border border-gray-700">
+              ← → move
+            </div>
+            <div className="px-3 py-1.5 rounded bg-gray-800 text-gray-300 text-[11px] font-medium border border-gray-700">
+              ↑ keep
+            </div>
+            <div className="px-3 py-1.5 rounded bg-gray-800 text-gray-300 text-[11px] font-medium border border-gray-700">
+              ↓ reject
+            </div>
+            <div className="px-3 py-1.5 rounded bg-gray-800 text-gray-300 text-[11px] font-medium border border-gray-700">
+              Backspace reset
+            </div>
+            <div className="px-3 py-1.5 rounded bg-gray-800 text-gray-300 text-[11px] font-medium border border-gray-700">
+              Esc close
+            </div>
           </div>
         </div>
       </div>
 
       <div className="flex-1 flex items-center justify-center overflow-hidden p-2 relative group">
-        <button onClick={() => onNavigate(selectedIndex - 1)} className="absolute left-4 p-3 bg-black/50 text-white rounded-full opacity-0 group-hover:opacity-100 hover:bg-black/80 transition-all z-10"><ChevronLeft /></button>
-        <button onClick={() => onNavigate(selectedIndex + 1)} className="absolute right-4 p-3 bg-black/50 text-white rounded-full opacity-0 group-hover:opacity-100 hover:bg-black/80 transition-all z-10"><ChevronRight /></button>
+        <button
+          onClick={() => onNavigate(selectedIndex - 1)}
+          className="absolute left-4 p-3 bg-black/50 text-white rounded-full opacity-0 group-hover:opacity-100 hover:bg-black/80 transition-all z-10"
+        >
+          <ChevronLeft />
+        </button>
+        <button
+          onClick={() => onNavigate(selectedIndex + 1)}
+          className="absolute right-4 p-3 bg-black/50 text-white rounded-full opacity-0 group-hover:opacity-100 hover:bg-black/80 transition-all z-10"
+        >
+          <ChevronRight />
+        </button>
         
         {src === '' ? (
           <div className="flex flex-col items-center gap-2 text-gray-500">
@@ -237,29 +415,47 @@ const ReviewMode = ({ fileEntry, allFiles, selectedIndex, onClose, onNavigate, o
             <span className="text-sm font-mono">Processing...</span>
           </div>
         ) : src === null ? (
-           <div className="flex flex-col items-center text-gray-500 gap-4"><AlertCircle size={48} /><span>Preview Unavailable</span></div>
+          <div className="flex flex-col items-center text-gray-500 gap-4">
+            <AlertCircle size={48} />
+            <span>Preview Unavailable</span>
+          </div>
         ) : (
-          <img src={src} className={`max-h-full max-w-full object-contain shadow-2xl transition-all duration-200 ${
-            fileEntry.status === 'keep' ? 'ring-4 ring-green-500/50' : 
-            fileEntry.status === 'reject' ? 'opacity-50 grayscale' : ''
-          }`} style={{ imageRendering: 'crisp-edges' }} />
+          <img
+            src={src}
+            className={`max-h-full max-w-full object-contain shadow-2xl transition-all duration-200 ${
+              fileEntry.status === 'keep'
+                ? 'ring-4 ring-green-500/50'
+                : fileEntry.status === 'reject'
+                ? 'opacity-50 grayscale'
+                : ''
+            }`}
+            style={{ imageRendering: 'crisp-edges' }}
+          />
         )}
       </div>
 
       <div className="h-24 bg-[#1a1a1a] border-t border-gray-800 flex items-center px-2">
-        <div ref={filmstripRef} className="flex gap-2 overflow-x-auto w-full h-20 items-center px-2 scrollbar-hide">
-          {allFiles.map((file: FileEntry, idx: number) => (
+        <div
+          ref={filmstripRef}
+          className="flex gap-2 overflow-x-auto w-full h-20 items-center px-2 scrollbar-hide"
+        >
+          {allFiles.map((file, idx: number) => (
             <div key={file.name} className="h-16 w-16 min-w-[4rem]">
-              <Thumbnail fileHandle={file.handle} status={file.status} isSelected={idx === selectedIndex} onClick={() => onNavigate(idx)} />
+              <Thumbnail
+                fileHandle={file.handle}
+                status={file.status}
+                isSelected={idx === selectedIndex}
+                onClick={() => onNavigate(idx)}
+              />
             </div>
           ))}
         </div>
       </div>
     </div>
   );
-};
+}
 
-// --- MAIN APP ---
+// MAIN APP
 function App() {
   const [files, setFiles] = useState<FileEntry[]>([]);
   const [rootHandle, setRootHandle] = useState<FileSystemDirectoryHandle | null>(null);
@@ -275,106 +471,104 @@ function App() {
     return () => window.removeEventListener('click', closeMenu);
   }, [isSortMenuOpen]);
 
-  // --- UPDATED FUNCTION: Immediate Error Handling ---
-const handleOpenFolder = async () => {
-  if (!(window as any).showDirectoryPicker) {
-    alert(
-      'Your browser does not support the File System Access API.\n\n' +
-      'Try Chrome, Edge, or another Chromium based browser.'
-    );
-    return;
-  }
-
-  let dirHandle: FileSystemDirectoryHandle;
-
-  // 1) Let the user pick a directory
-  try {
-    dirHandle = await (window as any).showDirectoryPicker({
-      mode: 'readwrite',
-    });
-  } catch (err: any) {
-    console.error('Folder picker error:', err);
-
-    const name = err?.name || '';
-    const msg = err?.message || '';
-
-    // Treat user cancel / close as a no-op (no popup)
-    const isUserCancel =
-      name === 'AbortError' ||
-      name === 'NotAllowedError' ||
-      /aborted|canceled|cancelled/i.test(msg);
-
-    if (isUserCancel) {
-      // Just reset to idle and return
-      setStatus('idle');
-      return;
-    }
-
-    // Real error
-    alert(
-      'Cannot open this folder. macOS may restrict access to some locations.\n\n' +
-      'Details: ' + name + (msg ? ' - ' + msg : '') + '\n\n' +
-      'Solution: Create a new folder for your photos (for example inside Downloads), ' +
-      'move your images there, and open that.'
-    );
-
-    setRootHandle(null);
-    setFiles([]);
-    setStatus('idle');
-    return;
-  }
-
-  // 2) We have a directory handle, now scan it
-  setStatus('loading');
-
-  try {
-    const foundFiles: FileEntry[] = [];
-
-    // @ts-ignore
-    for await (const entry of dirHandle.values()) {
-      try {
-        if (entry.kind === 'file') {
-          const ext = entry.name.split('.').pop()?.toLowerCase() || '';
-          if (ALLOWED_EXTENSIONS.includes(ext)) {
-            // @ts-ignore
-            foundFiles.push({ name: entry.name, handle: entry, status: 'unreviewed' });
-          }
-        }
-      } catch (e) {
-        console.warn('Skipped problematic file:', entry?.name, e);
-      }
-    }
-
-    if (foundFiles.length === 0) {
+  const handleOpenFolder = async () => {
+    if (!(window as any).showDirectoryPicker) {
       alert(
-        'No supported images found in this folder.\n\n' +
-        'Open a folder that contains photos or raw files only.'
+        'Your browser does not support the File System Access API.\n\n' +
+        'Try Chrome, Edge, or another Chromium based browser.'
       );
-      setFiles([]);
+      return;
+    }
+
+    let dirHandle: FileSystemDirectoryHandle;
+
+    try {
+      dirHandle = await (window as any).showDirectoryPicker({
+        mode: 'readwrite'
+      });
+    } catch (err: any) {
+      console.error('Folder picker error:', err);
+
+      const name = err?.name || '';
+      const msg = err?.message || '';
+
+      const isUserCancel =
+        name === 'AbortError' ||
+        name === 'NotAllowedError' ||
+        /aborted|canceled|cancelled/i.test(msg);
+
+      if (isUserCancel) {
+        setStatus('idle');
+        return;
+      }
+
+      alert(
+        'Cannot open this folder. macOS may restrict access to some locations.\n\n' +
+        'Details: ' + name + (msg ? ' - ' + msg : '') + '\n\n' +
+        'Solution: Create a new folder for your photos (for example inside Downloads), ' +
+        'move your images there, and open that.'
+      );
+
+      clearImageCache();
       setRootHandle(null);
+      setFiles([]);
       setStatus('idle');
       return;
     }
 
-    setRootHandle(dirHandle);
-    setFiles(foundFiles);
-    setStatus('ready');
-  } catch (err: any) {
-    console.error('Folder scan error:', err);
-    const name = err?.name || 'Error';
-    const msg = err?.message || '';
-    alert('Error while reading this folder.\n\n' + name + (msg ? ' - ' + msg : ''));
-    setRootHandle(null);
-    setFiles([]);
-    setStatus('idle');
-  }
-};
+    setStatus('loading');
 
+    try {
+      const foundFiles: FileEntry[] = [];
 
-  const updateStatus = (index: number, newStatus: 'keep' | 'reject' | 'unreviewed') => {
+      // @ts-ignore
+      for await (const entry of dirHandle.values()) {
+        try {
+          if (entry.kind === 'file') {
+            const ext = entry.name.split('.').pop()?.toLowerCase() || '';
+            if (ALLOWED_EXTENSIONS.includes(ext)) {
+              // @ts-ignore
+              foundFiles.push({ name: entry.name, handle: entry, status: 'unreviewed' });
+            }
+          }
+        } catch (e) {
+          console.warn('Skipped problematic file:', entry?.name, e);
+        }
+      }
+
+      if (foundFiles.length === 0) {
+        alert(
+          'No supported images found in this folder.\n\n' +
+          'Open a folder that contains photos or raw files only.'
+        );
+        clearImageCache();
+        setFiles([]);
+        setRootHandle(null);
+        setStatus('idle');
+        return;
+      }
+
+      clearImageCache();
+      setRootHandle(dirHandle);
+      setFiles(foundFiles);
+      setStatus('ready');
+    } catch (err: any) {
+      console.error('Folder scan error:', err);
+      const name = err?.name || 'Error';
+      const msg = err?.message || '';
+      alert('Error while reading this folder.\n\n' + name + (msg ? ' - ' + msg : ''));
+      clearImageCache();
+      setRootHandle(null);
+      setFiles([]);
+      setStatus('idle');
+    }
+  };
+
+  const updateStatus = (index: number, newStatus: FileEntry['status']) => {
     setFiles(prev => {
+      if (index < 0 || index >= prev.length) return prev;
       const copy = [...prev];
-      copy[index].status = newStatus;
+      copy[index] = { ...copy[index], status: newStatus };
       return copy;
     });
   };
@@ -390,27 +584,22 @@ const handleOpenFolder = async () => {
     setStatus('processing');
 
     try {
-      // Create or open the _Trash folder inside the chosen root
       // @ts-ignore
       const trashHandle: FileSystemDirectoryHandle = await rootHandle.getDirectoryHandle('_Trash', { create: true });
 
       for (const fileEntry of rejects) {
         try {
-          // Read the original file from its handle
           // @ts-ignore
           const srcFile: File = await fileEntry.handle.getFile();
 
-          // Create or open the destination file in _Trash
           // @ts-ignore
           const destFileHandle: FileSystemFileHandle = await trashHandle.getFileHandle(fileEntry.name, { create: true });
 
-          // Write the contents into the new file
           // @ts-ignore
           const writable = await destFileHandle.createWritable();
           await writable.write(srcFile);
           await writable.close();
 
-          // Remove the original file from the root directory
           // @ts-ignore
           await rootHandle.removeEntry(fileEntry.name);
         } catch (err) {
@@ -418,11 +607,10 @@ const handleOpenFolder = async () => {
         }
       }
 
-      // Update state: remove all rejected files
       setFiles(prev => prev.filter(f => f.status !== 'reject'));
     } catch (error) {
       console.error(error);
-      alert("Error moving files.");
+      alert('Error moving files.');
     } finally {
       setStatus('ready');
     }
@@ -431,15 +619,21 @@ const handleOpenFolder = async () => {
   const sortedFiles = useMemo(() => {
     const sorted = [...files];
     if (sortMode === 'name_asc') {
-      sorted.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+      sorted.sort((a, b) =>
+        a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })
+      );
     } else if (sortMode === 'name_desc') {
-      sorted.sort((a, b) => b.name.localeCompare(a.name, undefined, { numeric: true, sensitivity: 'base' }));
+      sorted.sort((a, b) =>
+        b.name.localeCompare(a.name, undefined, { numeric: true, sensitivity: 'base' })
+      );
     } else if (sortMode === 'status') {
-      const rank: Record<FileEntry['status'], number> = { keep: 1, unreviewed: 2, reject: 3 };
-      sorted.sort((a, b) => rank[a.status] - rank[b.status]);
+      if (selectedIndex === null) {
+        const rank: Record<FileEntry['status'], number> = { keep: 1, unreviewed: 2, reject: 3 };
+        sorted.sort((a, b) => rank[a.status] - rank[b.status]);
+      }
     }
     return sorted;
-  }, [files, sortMode]);
+  }, [files, sortMode, selectedIndex]);
 
   const rejectCount = files.filter(f => f.status === 'reject').length;
 
@@ -452,7 +646,16 @@ const handleOpenFolder = async () => {
           </div>
           <h1 className="text-6xl font-black tracking-tighter text-white">FlashCull</h1>
           <p className="text-gray-400 text-lg">Local-First. Privacy-First. Blazing Fast.</p>
-          <button onClick={handleOpenFolder} className="bg-white text-black hover:bg-gray-200 px-8 py-4 rounded-xl font-bold text-lg transition-all transform hover:scale-105">Open Folder</button>
+          <button
+            onClick={handleOpenFolder}
+            className="bg-white text-black hover:bg-gray-200 px-8 py-4 rounded-xl font-bold text-lg transition-all transform hover:scale-105"
+          >
+            Open Folder
+          </button>
+          <p className="text-xs text-gray-500 mt-2 max-w-md text-center">
+            Tip: After opening a folder, use Left and Right arrows to move, Up to mark keep,
+            Down to mark reject, Backspace to reset, and Esc to close review.
+          </p>
         </div>
       )}
 
@@ -465,25 +668,73 @@ const handleOpenFolder = async () => {
             </div>
             <div className="flex gap-3">
               {rejectCount > 0 && (
-                <button onClick={handleProcessFiles} className="flex items-center gap-2 bg-red-600 hover:bg-red-500 text-white px-4 py-2 rounded-lg text-sm font-bold transition-all shadow-lg shadow-red-900/20">
+                <button
+                  onClick={handleProcessFiles}
+                  className="flex items-center gap-2 bg-red-600 hover:bg-red-500 text-white px-4 py-2 rounded-lg text-sm font-bold transition-all shadow-lg shadow-red-900/20"
+                >
                   <Trash2 size={16} /> Move {rejectCount} to Trash
                 </button>
               )}
-              <button onClick={() => setStatus('idle')} className="text-sm text-gray-400 hover:text-white px-4 py-2 hover:bg-gray-800 rounded-lg transition-colors">Close</button>
+              <button
+                onClick={() => {
+                  clearImageCache();
+                  setFiles([]);
+                  setRootHandle(null);
+                  setSelectedIndex(null);
+                  setStatus('idle');
+                }}
+                className="text-sm text-gray-400 hover:text-white px-4 py-2 hover:bg-gray-800 rounded-lg transition-colors"
+              >
+                Close
+              </button>
             </div>
           </header>
 
           <div className="h-14 px-6 border-b border-gray-800 flex justify-between items-center bg-[#141414]">
             <div className="relative">
-              <button onClick={(e) => { e.stopPropagation(); setIsSortMenuOpen(!isSortMenuOpen); }} className="flex items-center gap-2 px-3 py-1.5 bg-gray-800 hover:bg-gray-700 rounded-lg text-sm font-medium transition-colors">
-                Sort By <ChevronDown size={14} className={`transition-transform ${isSortMenuOpen ? 'rotate-180' : ''}`} />
+              <button
+                onClick={e => {
+                  e.stopPropagation();
+                  setIsSortMenuOpen(!isSortMenuOpen);
+                }}
+                className="flex items-center gap-2 px-3 py-1.5 bg-gray-800 hover:bg-gray-700 rounded-lg text-sm font-medium transition-colors"
+              >
+                Sort By
+                <ChevronDown
+                  size={14}
+                  className={`transition-transform ${isSortMenuOpen ? 'rotate-180' : ''}`}
+                />
               </button>
               {isSortMenuOpen && (
                 <div className="absolute top-full left-0 mt-2 w-48 bg-[#1a1a1a] border border-gray-700 rounded-lg shadow-2xl overflow-hidden z-50">
-                  <button onClick={() => setSortMode('name_asc')} className="w-full text-left px-4 py-3 text-sm hover:bg-gray-800 flex items-center justify-between"><span className="flex items-center gap-2"><ArrowDownAZ size={14} /> Name (A-Z)</span>{sortMode === 'name_asc' && <Check size={14} className="text-blue-400" />}</button>
-                  <button onClick={() => setSortMode('name_desc')} className="w-full text-left px-4 py-3 text-sm hover:bg-gray-800 flex items-center justify-between"><span className="flex items-center gap-2"><ArrowUpAZ size={14} /> Name (Z-A)</span>{sortMode === 'name_desc' && <Check size={14} className="text-blue-400" />}</button>
+                  <button
+                    onClick={() => setSortMode('name_asc')}
+                    className="w-full text-left px-4 py-3 text-sm hover:bg-gray-800 flex items-center justify-between"
+                  >
+                    <span className="flex items-center gap-2">
+                      <ArrowDownAZ size={14} /> Name (A-Z)
+                    </span>
+                    {sortMode === 'name_asc' && <Check size={14} className="text-blue-400" />}
+                  </button>
+                  <button
+                    onClick={() => setSortMode('name_desc')}
+                    className="w-full text-left px-4 py-3 text-sm hover:bg-gray-800 flex items-center justify-between"
+                  >
+                    <span className="flex items-center gap-2">
+                      <ArrowUpAZ size={14} /> Name (Z-A)
+                    </span>
+                    {sortMode === 'name_desc' && <Check size={14} className="text-blue-400" />}
+                  </button>
                   <div className="h-px bg-gray-700 my-1 mx-2"></div>
-                  <button onClick={() => setSortMode('status')} className="w-full text-left px-4 py-3 text-sm hover:bg-gray-800 flex items-center justify-between"><span className="flex items-center gap-2"><ListFilter size={14} /> Status</span>{sortMode === 'status' && <Check size={14} className="text-blue-400" />}</button>
+                  <button
+                    onClick={() => setSortMode('status')}
+                    className="w-full text-left px-4 py-3 text-sm hover:bg-gray-800 flex items-center justify-between"
+                  >
+                    <span className="flex items-center gap-2">
+                      <ListFilter size={14} /> Status
+                    </span>
+                    {sortMode === 'status' && <Check size={14} className="text-blue-400" />}
+                  </button>
                 </div>
               )}
             </div>
@@ -491,13 +742,13 @@ const handleOpenFolder = async () => {
               <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Size</span>
               <div className="flex items-center gap-2 flex-1 group">
                 <ImageIcon size={22} className="text-gray-500" />
-                <input 
-                  type="range" 
-                  min="4" 
-                  max="12" 
+                <input
+                  type="range"
+                  min="4"
+                  max="12"
                   step="1"
                   value={columnCount}
-                  onChange={(e) => setColumnCount(Number(e.target.value))}
+                  onChange={e => setColumnCount(Number(e.target.value))}
                   className="w-full h-1 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-500 hover:accent-blue-400"
                 />
                 <LayoutGrid size={16} className="text-gray-500" />
@@ -507,20 +758,23 @@ const handleOpenFolder = async () => {
 
           <div className="flex-1 overflow-y-auto p-6 scrollbar-thin scrollbar-thumb-gray-700 scrollbar-track-transparent">
             {status === 'processing' ? (
-              <div className="h-full flex items-center justify-center text-xl text-gray-400 animate-pulse">Moving files to _Trash...</div>
+              <div className="h-full flex items-center justify-center text-xl text-gray-400 animate-pulse">
+                Moving files to _Trash...
+              </div>
             ) : (
-              <div 
+              <div
                 className="grid gap-4 transition-all duration-300 ease-in-out"
-                style={{ 
-                  gridTemplateColumns: `repeat(${columnCount}, minmax(0, 1fr))` 
+                style={{
+                  gridTemplateColumns: `repeat(${columnCount}, minmax(0, 1fr))`
                 }}
               >
                 {sortedFiles.map((file, idx) => (
-                  <div key={file.name} className="aspect-square w-full"> 
-                    <Thumbnail 
-                      fileHandle={file.handle} 
+                  <div key={file.name} className="aspect-square w-full">
+                    <Thumbnail
+                      fileHandle={file.handle}
                       status={file.status}
-                      onClick={() => setSelectedIndex(idx)} 
+                      onClick={() => setSelectedIndex(idx)}
+                      isSelected={selectedIndex === idx}
                     />
                   </div>
                 ))}
@@ -530,14 +784,18 @@ const handleOpenFolder = async () => {
         </div>
       )}
 
-      {selectedIndex !== null && (
-        <ReviewMode 
+      {selectedIndex !== null && selectedIndex >= 0 && selectedIndex < sortedFiles.length && (
+        <ReviewMode
           fileEntry={sortedFiles[selectedIndex]}
           allFiles={sortedFiles}
           selectedIndex={selectedIndex}
           onClose={() => setSelectedIndex(null)}
-          onNavigate={(i: number) => { if (i >= 0 && i < sortedFiles.length) setSelectedIndex(i); }}
-          onMark={(s: 'keep' | 'reject' | 'unreviewed') => updateStatus(files.indexOf(sortedFiles[selectedIndex]), s)}
+          onNavigate={(i: number) => {
+            if (i >= 0 && i < sortedFiles.length) setSelectedIndex(i);
+          }}
+          onMark={(s: FileEntry['status']) =>
+            updateStatus(files.indexOf(sortedFiles[selectedIndex]), s)
+          }
         />
       )}
     </div>
